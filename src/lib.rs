@@ -36,6 +36,12 @@ pub struct Config {
     pub total_zeroes_threshold: Option<u8>,
     pub output_file: String,
     pub post_url: Option<String>,
+    pub pattern: Option<Pattern>,
+}
+
+pub struct Pattern {
+    pub pattern_bytes: [u8; 20],
+    pub mask_bytes: [u8; 20],
 }
 
 /// Given a Config object with a factory address, a caller address, a keccak-256
@@ -393,16 +399,42 @@ fn mk_kernel_src(config: &Config) -> String {
     let tz = config.total_zeroes_threshold.unwrap_or(0);
     writeln!(src, "#define TOTAL_ZEROES {tz}").unwrap();
 
-    let condition = match (
-        config.leading_zeroes_threshold,
-        config.total_zeroes_threshold,
-    ) {
-        (Some(_), Some(_)) => "hasLeading(digest) || hasTotal(digest)",
-        (Some(_), None) => "hasLeading(digest)",
-        (None, Some(_)) => "hasTotal(digest)",
-        (None, None) => unreachable!(),
-    };
-    writeln!(src, "#define SUCCESS_CONDITION() {}", condition).unwrap();
+    // Define pattern matching constants and function if pattern is provided
+    if let Some(pattern) = &config.pattern {
+        for (i, &byte) in pattern.pattern_bytes.iter().enumerate() {
+            writeln!(src, "#define PATTERN_{} {}u", i, byte).unwrap();
+        }
+
+        for (i, &byte) in pattern.mask_bytes.iter().enumerate() {
+            writeln!(src, "#define MASK_{} {}u", i, byte).unwrap();
+        }
+
+        // Generate the pattern_match function
+        // Change __global to __private
+        writeln!(src, "bool pattern_match(__private const uchar *address) {{").unwrap();
+        src.push_str("    return ");
+        for i in 0..20 {
+            if i != 0 {
+                src.push_str(" &&\n           ");
+            }
+            write!(src, "((address[{i}] & MASK_{i}) == PATTERN_{i})").unwrap();
+        }
+        src.push_str(";\n}\n");
+    }
+
+    // Adjust SUCCESS_CONDITION macro to include pattern matching
+    let mut conditions = vec![];
+    if config.leading_zeroes_threshold.is_some() {
+        conditions.push("hasLeading(digest)");
+    }
+    if config.total_zeroes_threshold.is_some() {
+        conditions.push("hasTotal(digest)");
+    }
+    if config.pattern.is_some() {
+        conditions.push("pattern_match(digest)");
+    }
+    let condition = conditions.join(" || ");
+    writeln!(src, "#define SUCCESS_CONDITION() ({})", condition).unwrap();
 
     writeln!(src, "#define MAX_NONCE {}u", config.max_create3_nonce).unwrap();
 
