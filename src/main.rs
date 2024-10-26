@@ -83,7 +83,7 @@ struct Args {
     #[arg(
         short,
         long,
-        help = "Custom address pattern to match (e.g., 0xefefxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx)"
+        help = "Custom address pattern to match (e.g., 0xefefxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx). You can also match bits like this, but only on full bytes: 0xefefxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx[xxxxxx00]"
     )]
     pattern: Option<String>,
 }
@@ -104,29 +104,90 @@ impl TryInto<Config> for Args {
             // Remove '0x' prefix if present
             let pattern_str = pattern_str.trim_start_matches("0x");
 
-            // Check if the pattern length is exactly 40 hex characters (20 bytes)
-            if pattern_str.len() != 40 {
-                return Err("Pattern must be 40 hex characters (20 bytes) without '0x' or 42 characters including '0x'".to_string());
-            }
-
             let mut pattern_bytes = [0u8; 20];
             let mut mask_bytes = [0u8; 20];
 
-            for i in 0..20 {
-                let hex_pair = &pattern_str[i * 2..i * 2 + 2];
-                if hex_pair == "xx" || hex_pair == "XX" {
-                    // Wildcard byte
-                    pattern_bytes[i] = 0u8;
-                    mask_bytes[i] = 0u8;
+            let mut i = 0; // byte index
+            let mut j = 0; // char index
+
+            let chars: Vec<char> = pattern_str.chars().collect();
+
+            while i < 20 && j < chars.len() {
+                if chars[j] == '[' {
+                    // Parse bits inside brackets
+                    j += 1; // Skip '['
+                    let mut bit_index = 7; // Bits from MSB to LSB
+                    while j < chars.len() && chars[j] != ']' && bit_index >= 0 {
+                        let c = chars[j];
+                        match c {
+                            '0' | '1' => {
+                                if c == '1' {
+                                    pattern_bytes[i] |= 1 << bit_index;
+                                }
+                                mask_bytes[i] |= 1 << bit_index;
+                            }
+                            'x' | 'X' => {
+                                // Wildcard bit, mask bit is 0
+                            }
+                            _ => {
+                                return Err(format!(
+                                    "Invalid character '{}' in bit pattern at position {}",
+                                    c, j
+                                ));
+                            }
+                        }
+                        j += 1;
+                        bit_index -= 1;
+                    }
+                    if bit_index != -1 {
+                        return Err(format!(
+                            "Bit pattern inside brackets must be exactly 8 bits at position {}",
+                            j
+                        ));
+                    }
+                    if j >= chars.len() || chars[j] != ']' {
+                        return Err("Unclosed '[' in pattern".to_string());
+                    }
+                    j += 1; // Skip ']'
+                    i += 1; // Move to next byte
                 } else {
-                    // Specific byte
-                    let byte = u8::from_str_radix(hex_pair, 16).map_err(|_| {
-                        format!("Invalid hex character in pattern at position {}", i * 2)
-                    })?;
-                    pattern_bytes[i] = byte;
-                    mask_bytes[i] = 0xFF;
+                    // Parse hex pair
+                    if j + 1 >= chars.len() {
+                        return Err("Incomplete hex byte in pattern".to_string());
+                    }
+                    let c1 = chars[j];
+                    let c2 = chars[j + 1];
+                    if (c1 == 'x' || c1 == 'X') && (c2 == 'x' || c2 == 'X') {
+                        pattern_bytes[i] = 0u8;
+                        mask_bytes[i] = 0u8;
+                    } else if (c1 == 'x' || c1 == 'X') || (c2 == 'x' || c2 == 'X') {
+                        return Err(format!(
+                            "Invalid hex character in pattern at position {}: '{}{}'",
+                            j, c1, c2
+                        ));
+                    } else {
+                        let hex_pair = format!("{}{}", c1, c2);
+                        let byte = u8::from_str_radix(&hex_pair, 16).map_err(|_| {
+                            format!(
+                                "Invalid hex character in pattern at position {}: '{}{}'",
+                                j, c1, c2
+                            )
+                        })?;
+                        pattern_bytes[i] = byte;
+                        mask_bytes[i] = 0xFF;
+                    }
+                    j += 2;
+                    i += 1;
                 }
             }
+
+            if i != 20 {
+                return Err(format!(
+                    "Pattern must result in exactly 20 bytes but got {} bytes.",
+                    i
+                ));
+            }
+
             Some(Pattern {
                 pattern_bytes,
                 mask_bytes,
