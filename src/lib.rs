@@ -411,7 +411,7 @@ fn mk_kernel_src(config: &Config) -> String {
 
         // Generate the pattern_match function
         // Change __global to __private
-        writeln!(src, "bool pattern_match(__private const uchar *address) {{").unwrap();
+        writeln!(src, "bool pattern_match(const uchar *address) {{").unwrap();
         src.push_str("    return ");
         for i in 0..20 {
             if i != 0 {
