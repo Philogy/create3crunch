@@ -43,14 +43,7 @@ struct Args {
     #[arg(
         short,
         long,
-        help = "Minimum amount of leading zeros for the solution to be considered valuable"
-    )]
-    leading_zeros: Option<u8>,
-
-    #[arg(
-        short,
-        long,
-        help = "Minimum amount of total zero bytes for the address to be consiered valuable"
+        help = "Minimum amount of total zero bytes for the address to be considered valuable"
     )]
     total_zeros: Option<u8>,
 
@@ -62,7 +55,13 @@ struct Args {
     )]
     max_create3_nonce: u8,
 
-    #[arg(short, long, value_parser=parse_worksize, default_value_t=0x4000000, help="Specifies the GPU work size, min. 0x154000")]
+    #[arg(
+        short,
+        long,
+        value_parser = parse_worksize,
+        default_value_t = 0x4000000,
+        help = "Specifies the GPU work size, min. 0x154000"
+    )]
     work_size: u32,
 
     #[arg(
@@ -73,112 +72,85 @@ struct Args {
     )]
     output_file: String,
 
-    #[arg(
-        long,
-        default_value = None,
-        help = "Url to POST efficient addresses to"
-    )]
+    #[arg(long, default_value = None, help = "URL to POST efficient addresses to")]
     post_url: Option<String>,
 
     #[arg(
         short,
         long,
-        help = "Custom address pattern to match (e.g., 0xefefxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx). You can also match bits like this, but only on full bytes: 0xefefxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx[xxxxxx00]"
+        help = "Custom address patterns to match (e.g., 0xefefxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx). You can use 'x' for wildcard nibbles.",
+        action = clap::ArgAction::Append
     )]
-    pattern: Option<String>,
+    pattern: Vec<String>,
 }
 
 impl TryInto<Config> for Args {
     type Error = String;
 
     fn try_into(self) -> Result<Config, Self::Error> {
-        if self.leading_zeros.is_none() && self.total_zeros.is_none() && self.pattern.is_none() {
-            return Err(
-                "Must specify at least one of total zeros, leading zeros, or a custom pattern"
-                    .to_string(),
-            );
+        if self.total_zeros.is_none() && self.pattern.is_empty() {
+            return Err("Must specify at least one of total zeros or a custom pattern".to_string());
         }
 
-        // Parse the pattern if provided
-        let pattern = if let Some(pattern_str) = &self.pattern {
-            // Remove '0x' prefix if present
-            let pattern_str = pattern_str.trim_start_matches("0x");
+        // Parse the patterns if provided
+        let mut patterns = Vec::new();
 
-            let mut pattern_bytes = [0u8; 20];
-            let mut mask_bytes = [0u8; 20];
+        for pattern_str in &self.pattern {
+            // Remove '0x' prefix if present (only once)
+            let pattern_str = pattern_str.strip_prefix("0x").unwrap_or(pattern_str);
 
-            let mut i = 0; // byte index
-            let mut j = 0; // char index
+            if pattern_str.len() > 40 {
+                return Err("Pattern length cannot exceed 40 characters (20 bytes).".to_string());
+            }
+
+            let mut pattern_bytes = [0u8; 20]; // Initialize with zeros
+            let mut mask_bytes = [0u8; 20]; // Initialize with zeros
 
             let chars: Vec<char> = pattern_str.chars().collect();
+            let mut i = 0; // byte index
+            let mut nibble = 0; // character index
 
-            while i < 20 && j < chars.len() {
-                if chars[j] == '[' {
-                    // Parse bits inside brackets
-                    j += 1; // Skip '['
-                    let mut bit_index = 7; // Bits from MSB to LSB
-                    while j < chars.len() && chars[j] != ']' && bit_index >= 0 {
-                        let c = chars[j];
-                        match c {
-                            '0' | '1' => {
-                                if c == '1' {
-                                    pattern_bytes[i] |= 1 << bit_index;
-                                }
-                                mask_bytes[i] |= 1 << bit_index;
-                            }
-                            'x' | 'X' => {
-                                // Wildcard bit, mask bit is 0
-                            }
-                            _ => {
-                                return Err(format!(
-                                    "Invalid character '{}' in bit pattern at position {}",
-                                    c, j
-                                ));
-                            }
+            while i < 20 && nibble < chars.len() {
+                let c = chars[nibble];
+                let nibble_value = match c {
+                    'x' | 'X' => {
+                        // Wildcard nibble
+                        // Do not set any bits in mask_bytes[i]
+                        0
+                    }
+                    c if c.is_digit(16) => {
+                        // Hex digit
+                        // Set the corresponding nibble in pattern_bytes[i]
+                        if nibble % 2 == 0 {
+                            mask_bytes[i] |= 0xF0; // High nibble
+                        } else {
+                            mask_bytes[i] |= 0x0F; // Low nibble
                         }
-                        j += 1;
-                        bit_index -= 1;
+                        c.to_digit(16).unwrap() as u8
                     }
-                    if bit_index != -1 {
+                    _ => {
                         return Err(format!(
-                            "Bit pattern inside brackets must be exactly 8 bits at position {}",
-                            j
+                            "Invalid character '{}' in pattern at position {}",
+                            c, nibble
                         ));
                     }
-                    if j >= chars.len() || chars[j] != ']' {
-                        return Err("Unclosed '[' in pattern".to_string());
-                    }
-                    j += 1; // Skip ']'
-                    i += 1; // Move to next byte
+                };
+
+                if nibble % 2 == 0 {
+                    // High nibble
+                    pattern_bytes[i] |= nibble_value << 4;
                 } else {
-                    // Parse hex pair
-                    if j + 1 >= chars.len() {
-                        return Err("Incomplete hex byte in pattern".to_string());
-                    }
-                    let c1 = chars[j];
-                    let c2 = chars[j + 1];
-                    if (c1 == 'x' || c1 == 'X') && (c2 == 'x' || c2 == 'X') {
-                        pattern_bytes[i] = 0u8;
-                        mask_bytes[i] = 0u8;
-                    } else if (c1 == 'x' || c1 == 'X') || (c2 == 'x' || c2 == 'X') {
-                        return Err(format!(
-                            "Invalid hex character in pattern at position {}: '{}{}'",
-                            j, c1, c2
-                        ));
-                    } else {
-                        let hex_pair = format!("{}{}", c1, c2);
-                        let byte = u8::from_str_radix(&hex_pair, 16).map_err(|_| {
-                            format!(
-                                "Invalid hex character in pattern at position {}: '{}{}'",
-                                j, c1, c2
-                            )
-                        })?;
-                        pattern_bytes[i] = byte;
-                        mask_bytes[i] = 0xFF;
-                    }
-                    j += 2;
-                    i += 1;
+                    // Low nibble
+                    pattern_bytes[i] |= nibble_value;
+                    i += 1; // Move to next byte after completing low nibble
                 }
+
+                nibble += 1;
+            }
+
+            if nibble % 2 != 0 {
+                // If an odd number of nibbles, pad the last low nibble with wildcard
+                i += 1;
             }
 
             if i != 20 {
@@ -188,13 +160,11 @@ impl TryInto<Config> for Args {
                 ));
             }
 
-            Some(Pattern {
+            patterns.push(Pattern {
                 pattern_bytes,
                 mask_bytes,
-            })
-        } else {
-            None
-        };
+            });
+        }
 
         Ok(Config {
             factory: self.factory,
@@ -202,9 +172,8 @@ impl TryInto<Config> for Args {
             init_code_hash: self.initcode_hash,
             work_size: self.work_size,
             gpu_device: self.gpu_device,
-            leading_zeroes_threshold: self.leading_zeros,
             total_zeroes_threshold: self.total_zeros,
-            pattern,
+            patterns,
             max_create3_nonce: self.max_create3_nonce,
             output_file: self.output_file,
             post_url: self.post_url,

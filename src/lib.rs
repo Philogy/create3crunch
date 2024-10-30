@@ -1,6 +1,3 @@
-#![warn(unused_crate_dependencies, unreachable_pub)]
-#![deny(unused_must_use, rust_2018_idioms)]
-
 use clap as _;
 use clap_num as _;
 
@@ -32,11 +29,10 @@ pub struct Config {
     pub work_size: u32,
     pub gpu_device: u8,
     pub max_create3_nonce: u8,
-    pub leading_zeroes_threshold: Option<u8>,
     pub total_zeroes_threshold: Option<u8>,
     pub output_file: String,
     pub post_url: Option<String>,
-    pub pattern: Option<Pattern>,
+    pub patterns: Vec<Pattern>,
 }
 
 pub struct Pattern {
@@ -44,27 +40,6 @@ pub struct Pattern {
     pub mask_bytes: [u8; 20],
 }
 
-/// Given a Config object with a factory address, a caller address, a keccak-256
-/// hash of the contract initialization code, and a device ID, search for salts
-/// using OpenCL that will enable the factory contract to deploy a contract to a
-/// gas-efficient address via CREATE3. This method also takes threshold values
-/// for both leading zero bytes and total zero bytes - any address that does not
-/// meet or exceed the threshold will not be returned. Default threshold values
-/// are three leading zeroes or five total zeroes.
-///
-/// The 32-byte salt is constructed as follows:
-///   - the 20-byte calling address (to prevent frontrunning)
-///   - a random 4-byte segment (to prevent collisions with other runs)
-///   - a 4-byte segment unique to each work group running in parallel
-///   - a 4-byte nonce segment (incrementally stepped through during the run)
-///
-/// When a salt that will result in the creation of a gas-efficient contract
-/// address is found, it will be appended to `efficient_addresses.txt` along
-/// with the resultant address and the "value" (i.e. approximate rarity) of the
-/// resultant address.
-///
-/// This method is still highly experimental and could almost certainly use
-/// further optimization - contributions are more than welcome!
 pub fn gpu(config: Config) -> ocl::Result<()> {
     println!(
         "Setting up experimental OpenCL miner using device {}...",
@@ -237,10 +212,9 @@ pub fn gpu(config: Config) -> ocl::Result<()> {
                 // display information about the current search criteria
                 term.write_line(&format!(
                     "current search space: {}xxxxxxxx{:08x}\t\t\
-                     threshold: {:?} leading or {:?} total zeroes",
+                     threshold: {:?} total zeroes",
                     hex::encode(salt),
                     BigEndian::read_u64(&view_buf),
-                    config.leading_zeroes_threshold,
                     config.total_zeroes_threshold
                 ))?;
 
@@ -304,19 +278,10 @@ pub fn gpu(config: Config) -> ocl::Result<()> {
                 .create2(&create2_salt, &config.init_code_hash);
             let address = deployer.create(create1_nonce.into());
 
-            // count total and leading zero bytes
-            let mut total = 0;
-            let mut leading = 0;
-            for (i, &b) in address.iter().enumerate() {
-                if b == 0 {
-                    total += 1;
-                } else if leading == 0 {
-                    // set leading on finding non-zero byte
-                    leading = i;
-                }
-            }
+            // count total zero bytes
+            let total = address.iter().filter(|&&b| b == 0).count();
 
-            let key = leading * 20 + total;
+            let key = total;
             let reward = rewards.get(&key).unwrap_or("0");
             let salt = hex::encode(create2_salt);
             let contract_salt_nonce = create1_nonce - 1;
@@ -325,7 +290,7 @@ pub fn gpu(config: Config) -> ocl::Result<()> {
                 salt, contract_salt_nonce, address, reward
             );
 
-            let show = format!("{output} ({leading} / {total})");
+            let show = format!("{output} (total zeros: {total})");
             found_list.push(show.to_string());
 
             file.lock_exclusive().expect("Couldn't lock file.");
@@ -335,12 +300,11 @@ pub fn gpu(config: Config) -> ocl::Result<()> {
 
             file.unlock().expect("Couldn't unlock file.");
 
-            // If the post_url is set, send a POST request to it in a seperate thread
+            // If the post_url is set, send a POST request to it in a separate thread
             if let Some(url) = config.post_url.clone() {
                 let data = PostData {
                     salt,
                     nonce: contract_salt_nonce,
-                    leading,
                     total,
                     address: address.to_string(),
                     reward: reward.to_string(),
@@ -366,7 +330,6 @@ struct PostData {
     salt: String,
     nonce: u64,
     address: String,
-    leading: usize,
     total: usize,
     reward: String,
 }
@@ -381,8 +344,6 @@ fn output_file(path: &str) -> File {
         .unwrap_or_else(|_| panic!("Could not create or open `{}` file.", path))
 }
 
-/// Creates the OpenCL kernel source code by populating the template with the
-/// values from the Config object.
 fn mk_kernel_src(config: &Config) -> String {
     let mut src = String::with_capacity(2048 + KERNEL_SRC.len());
 
@@ -394,46 +355,53 @@ fn mk_kernel_src(config: &Config) -> String {
         writeln!(src, "#define S_{} {}u", i + 1, x).unwrap();
     }
 
-    let lz = config.leading_zeroes_threshold.unwrap_or(0);
-    writeln!(src, "#define LEADING_ZEROES {lz}").unwrap();
     let tz = config.total_zeroes_threshold.unwrap_or(0);
     writeln!(src, "#define TOTAL_ZEROES {tz}").unwrap();
 
-    // Define pattern matching constants and function if pattern is provided
-    if let Some(pattern) = &config.pattern {
-        for (i, &byte) in pattern.pattern_bytes.iter().enumerate() {
-            writeln!(src, "#define PATTERN_{} {}u", i, byte).unwrap();
-        }
-
-        for (i, &byte) in pattern.mask_bytes.iter().enumerate() {
-            writeln!(src, "#define MASK_{} {}u", i, byte).unwrap();
-        }
-
-        // Generate the pattern_match function
-        // Change __global to __private
-        writeln!(src, "bool pattern_match(const uchar *address) {{").unwrap();
-        src.push_str("    return ");
-        for i in 0..20 {
-            if i != 0 {
-                src.push_str(" &&\n           ");
-            }
-            write!(src, "((address[{i}] & MASK_{i}) == PATTERN_{i})").unwrap();
-        }
-        src.push_str(";\n}\n");
-    }
-
-    // Adjust SUCCESS_CONDITION macro to include pattern matching
     let mut conditions = vec![];
-    if config.leading_zeroes_threshold.is_some() {
-        conditions.push("hasLeading(digest)");
-    }
     if config.total_zeroes_threshold.is_some() {
         conditions.push("hasTotal(digest)");
     }
-    if config.pattern.is_some() {
+
+    // Define pattern matching constants and function if patterns are provided
+    if !config.patterns.is_empty() {
+        for (i, pattern) in config.patterns.iter().enumerate() {
+            for (j, &byte) in pattern.pattern_bytes.iter().enumerate() {
+                writeln!(src, "#define PATTERN_{}_{} {}u", i, j, byte).unwrap();
+            }
+            for (j, &byte) in pattern.mask_bytes.iter().enumerate() {
+                writeln!(src, "#define MASK_{}_{} {}u", i, j, byte).unwrap();
+            }
+        }
+
+        // Generate the pattern_match function
+        writeln!(src, "bool pattern_match(const uchar *address) {{").unwrap();
+        src.push_str("    return \n");
+
+        for (i, _pattern) in config.patterns.iter().enumerate() {
+            if i > 0 {
+                src.push_str("        ||\n");
+            }
+            src.push_str("        (");
+            for j in 0..20 {
+                if j > 0 {
+                    src.push_str(" &&\n            ");
+                }
+                write!(src, "((address[{j}] & MASK_{i}_{j}) == PATTERN_{i}_{j})").unwrap();
+            }
+            src.push_str(")");
+        }
+        src.push_str(";\n}\n");
+
         conditions.push("pattern_match(digest)");
     }
-    let condition = conditions.join(" || ");
+
+    let condition = if conditions.is_empty() {
+        "false".to_string()
+    } else {
+        conditions.join(" || ")
+    };
+
     writeln!(src, "#define SUCCESS_CONDITION() ({})", condition).unwrap();
 
     writeln!(src, "#define MAX_NONCE {}u", config.max_create3_nonce).unwrap();

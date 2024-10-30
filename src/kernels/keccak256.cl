@@ -201,15 +201,6 @@ static inline bool hasTotal(const uchar *d)
   return zeros >= TOTAL_ZEROES;
 }
 
-static inline bool hasLeading(const uchar *d)
-{
-#pragma unroll
-  for (uint i = 0; i < LEADING_ZEROES; ++i) {
-    if (d[i] != 0) return false;
-  }
-  return true;
-}
-
 /* The pattern_match function is generated in lib.rs and should accept __generic const uchar *address */
 /* The SUCCESS_CONDITION macro is also generated in lib.rs and uses the functions above */
 
@@ -218,7 +209,6 @@ __kernel void hashMessage(
   __constant uint const *d_nonce,
   __global volatile ulong *restrict solutions
 ) {
-
   ulong spongeBuffer[25];
 
 #define sponge ((uchar *) spongeBuffer)
