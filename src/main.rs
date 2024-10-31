@@ -11,7 +11,7 @@ fn parse_worksize(s: &str) -> Result<u32, String> {
     Ok(work_size)
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
     #[arg(
@@ -25,7 +25,7 @@ struct Args {
     #[arg(
         short,
         long,
-        help = "Owner / Caller address (first 20-bytes of the top-level salt will be set to the address)"
+        help = "Owner / Caller address (first 20 bytes of the top-level salt will be set to the address)"
     )]
     owner: Address,
 
@@ -78,7 +78,7 @@ struct Args {
     #[arg(
         short,
         long,
-        help = "Custom address patterns to match (e.g., 0xefefxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx). You can use 'x' for wildcard nibbles.",
+        help = "Custom address patterns to match (e.g., 0xefefxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx). You can use 'x' for wildcard nibbles and define bits inside brackets, e.g., [xxxxxx01]",
         action = clap::ArgAction::Append
     )]
     pattern: Vec<String>,
@@ -99,58 +99,96 @@ impl TryInto<Config> for Args {
             // Remove '0x' prefix if present (only once)
             let pattern_str = pattern_str.strip_prefix("0x").unwrap_or(pattern_str);
 
-            if pattern_str.len() > 40 {
-                return Err("Pattern length cannot exceed 40 characters (20 bytes).".to_string());
-            }
-
-            let mut pattern_bytes = [0u8; 20]; // Initialize with zeros
-            let mut mask_bytes = [0u8; 20]; // Initialize with zeros
+            let mut pattern_bytes = [0u8; 20];
+            let mut mask_bytes = [0u8; 20];
 
             let chars: Vec<char> = pattern_str.chars().collect();
             let mut i = 0; // byte index
-            let mut nibble = 0; // character index
+            let mut j = 0; // char index
 
-            while i < 20 && nibble < chars.len() {
-                let c = chars[nibble];
-                let nibble_value = match c {
-                    'x' | 'X' => {
-                        // Wildcard nibble
-                        // Do not set any bits in mask_bytes[i]
-                        0
-                    }
-                    c if c.is_digit(16) => {
-                        // Hex digit
-                        // Set the corresponding nibble in pattern_bytes[i]
-                        if nibble % 2 == 0 {
-                            mask_bytes[i] |= 0xF0; // High nibble
-                        } else {
-                            mask_bytes[i] |= 0x0F; // Low nibble
+            while i < 20 && j < chars.len() {
+                if chars[j] == '[' {
+                    // Parse bits inside brackets
+                    j += 1; // Skip '['
+                    let mut bit_index = 7; // Bits from MSB to LSB
+                    while j < chars.len() && chars[j] != ']' && bit_index >= 0 {
+                        let c = chars[j];
+                        match c {
+                            '0' | '1' => {
+                                if c == '1' {
+                                    pattern_bytes[i] |= 1 << bit_index;
+                                }
+                                mask_bytes[i] |= 1 << bit_index;
+                            }
+                            'x' | 'X' => {
+                                // Wildcard bit, mask bit is 0
+                            }
+                            _ => {
+                                return Err(format!(
+                                    "Invalid character '{}' in bit pattern at position {}",
+                                    c, j
+                                ));
+                            }
                         }
-                        c.to_digit(16).unwrap() as u8
+                        j += 1;
+                        bit_index -= 1;
                     }
-                    _ => {
+                    if bit_index != -1 {
                         return Err(format!(
-                            "Invalid character '{}' in pattern at position {}",
-                            c, nibble
+                            "Bit pattern inside brackets must be exactly 8 bits at position {}",
+                            j
                         ));
                     }
-                };
-
-                if nibble % 2 == 0 {
-                    // High nibble
-                    pattern_bytes[i] |= nibble_value << 4;
+                    if j >= chars.len() || chars[j] != ']' {
+                        return Err("Unclosed '[' in pattern".to_string());
+                    }
+                    j += 1; // Skip ']'
+                    i += 1; // Move to next byte
                 } else {
-                    // Low nibble
-                    pattern_bytes[i] |= nibble_value;
-                    i += 1; // Move to next byte after completing low nibble
+                    // Parse hex pair
+                    if j + 1 >= chars.len() {
+                        return Err("Incomplete hex byte in pattern".to_string());
+                    }
+                    let c1 = chars[j];
+                    let c2 = chars[j + 1];
+
+                    for (nibble_index, c) in [c1, c2].iter().enumerate() {
+                        let nibble_value = match *c {
+                            'x' | 'X' => {
+                                // Wildcard nibble
+                                // Do not set any bits in mask_bytes[i]
+                                0
+                            }
+                            c if c.is_digit(16) => {
+                                // Hex digit
+                                if nibble_index == 0 {
+                                    mask_bytes[i] |= 0xF0; // High nibble
+                                } else {
+                                    mask_bytes[i] |= 0x0F; // Low nibble
+                                }
+                                c.to_digit(16).unwrap() as u8
+                            }
+                            _ => {
+                                return Err(format!(
+                                    "Invalid hex character in pattern at position {}: '{}'",
+                                    j + nibble_index,
+                                    c
+                                ));
+                            }
+                        };
+
+                        if nibble_index == 0 {
+                            // High nibble
+                            pattern_bytes[i] |= nibble_value << 4;
+                        } else {
+                            // Low nibble
+                            pattern_bytes[i] |= nibble_value;
+                        }
+                    }
+
+                    j += 2; // Move to next pair of characters
+                    i += 1; // Move to next byte
                 }
-
-                nibble += 1;
-            }
-
-            if nibble % 2 != 0 {
-                // If an odd number of nibbles, pad the last low nibble with wildcard
-                i += 1;
             }
 
             if i != 20 {
@@ -183,6 +221,7 @@ impl TryInto<Config> for Args {
 
 fn main() {
     let args = Args::parse();
+    println!("Starting miner with args: {:?}", args);
 
     gpu(args.try_into().unwrap()).unwrap()
 }
