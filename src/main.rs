@@ -114,7 +114,7 @@ impl TryInto<Config> for Args {
                 })?;
 
                 if !(force_capitalize || self.case_sensitive) {
-                    pattern.capitalize = None;
+                    pattern.capitalizations = [None; 40];
                 }
 
                 Ok(pattern)

@@ -1,11 +1,33 @@
-use alloy_primitives::{uint, U160};
+use alloy_primitives::{uint, Address, U160};
 use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pattern {
     pub target: U160,
     pub mask: U160,
-    pub capitalize: Option<[bool; 40]>,
+    pub capitalizations: [Option<bool>; 40],
+}
+
+impl Pattern {
+    pub fn matches_bits(&self, addr: &Address) -> bool {
+        let target_addr: Address = self.target.into();
+        *addr & self.mask.into() == target_addr
+    }
+
+    pub fn matches_capitalization(&self, addr: &Address) -> bool {
+        let heap_checksum = addr.to_checksum(None);
+        let checksum = heap_checksum.strip_prefix("0x").unwrap();
+        checksum
+            .char_indices()
+            .all(|(i, c)| match self.capitalizations[i] {
+                None => true,
+                Some(expecting_upper) => expecting_upper == c.is_uppercase(),
+            })
+    }
+
+    pub fn matches(&self, addr: &Address) -> bool {
+        self.matches_bits(addr) && self.matches_capitalization(addr)
+    }
 }
 
 impl FromStr for Pattern {
@@ -17,7 +39,7 @@ impl FromStr for Pattern {
 
         let mut target = U160::ZERO;
         let mut mask = U160::ZERO;
-        let mut capitalize = [false; 40];
+        let mut capitalizations = [None; 40];
         let mut addr_char_index = 0usize;
         let mut rel_bit_offset = 0usize;
         let mut in_bit_group = false;
@@ -67,18 +89,18 @@ impl FromStr for Pattern {
                     }
 
                     let mask_nibble = if c == 'x' { U160::ZERO } else { uint!(0xfU160) };
-                    let (target_nibble, uppercase_nibble) = match c {
-                        '0'..='9' => (U160::from((c as u8) - ('0' as u8)), false),
-                        'a'..='f' => (U160::from((c as u8) - ('a' as u8) + 10), false),
-                        'A'..='F' => (U160::from((c as u8) - ('A' as u8) + 10), true),
-                        'x' => (U160::ZERO, false),
+                    let (target_nibble, capitalize) = match c {
+                        '0'..='9' => (U160::from((c as u8) - ('0' as u8)), None),
+                        'a'..='f' => (U160::from((c as u8) - ('a' as u8) + 10), Some(false)),
+                        'A'..='F' => (U160::from((c as u8) - ('A' as u8) + 10), Some(true)),
+                        'x' => (U160::ZERO, None),
                         _ => unreachable!(),
                     };
 
                     let nibble_offset = (39 - addr_char_index) * 4;
                     target |= target_nibble << nibble_offset;
                     mask |= mask_nibble << nibble_offset;
-                    capitalize[addr_char_index] = uppercase_nibble;
+                    capitalizations[addr_char_index] = capitalize;
                     addr_char_index += 1;
                 }
                 _ => {
@@ -107,7 +129,7 @@ impl FromStr for Pattern {
         Ok(Pattern {
             target,
             mask,
-            capitalize: Some(capitalize),
+            capitalizations,
         })
     }
 }
@@ -117,6 +139,19 @@ mod tests {
     use super::*;
     use alloy_primitives::uint;
 
+    struct CapBuilder([Option<bool>; 40]);
+
+    impl CapBuilder {
+        fn new() -> Self {
+            Self([None; 40])
+        }
+
+        fn set(mut self, i: usize, b: bool) -> Self {
+            self.0[i] = Some(b);
+            self
+        }
+    }
+
     #[test]
     fn test_basic_pattern() {
         assert_eq!(
@@ -124,7 +159,7 @@ mod tests {
             Ok(Pattern {
                 target: uint!(0x0000000000000000000000000000000000000000U160),
                 mask: uint!(0xffffffffffffff00000000000000000000000000U160),
-                capitalize: Some([false; 40])
+                capitalizations: [None; 40]
             })
         )
     }
@@ -136,12 +171,14 @@ mod tests {
             Ok(Pattern {
                 target: uint!(0xAFD0000000000000000000000000000000700BADU160),
                 mask: uint!(0xfff000000000000000000000000000000ff00fffU160),
-                capitalize: Some([
-                    true, false, true, false, false, false, false, false, false, false, false,
-                    false, false, false, false, false, false, false, false, false, false, false,
-                    false, false, false, false, false, false, false, false, false, false, false,
-                    false, false, false, false, false, false, true
-                ])
+                capitalizations: CapBuilder::new()
+                    .set(0, true)
+                    .set(1, false)
+                    .set(2, true)
+                    .set(37, false)
+                    .set(38, false)
+                    .set(39, true)
+                    .0
             })
         )
     }
@@ -153,12 +190,14 @@ mod tests {
             Ok(Pattern {
                 target: uint!(0xAFD0004320000000000000000000000000700BADU160),
                 mask: uint!(0xfff000d3b000000000000000000000000ff00fffU160),
-                capitalize: Some([
-                    true, false, true, false, false, false, false, false, false, false, false,
-                    false, false, false, false, false, false, false, false, false, false, false,
-                    false, false, false, false, false, false, false, false, false, false, false,
-                    false, false, false, false, false, false, true
-                ])
+                capitalizations: CapBuilder::new()
+                    .set(0, true)
+                    .set(1, false)
+                    .set(2, true)
+                    .set(37, false)
+                    .set(38, false)
+                    .set(39, true)
+                    .0
             })
         )
     }

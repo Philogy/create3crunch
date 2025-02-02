@@ -18,9 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use terminal_size::{terminal_size, Height};
 
 pub mod pattern;
-mod reward;
 pub use crate::pattern::Pattern;
-pub use reward::Reward;
 
 static KERNEL_SRC: &str = include_str!("./kernels/keccak256.cl");
 
@@ -45,9 +43,6 @@ pub fn gpu(config: Config) -> ocl::Result<()> {
 
     // (create if necessary) and open a file where found salts will be written
     let file = output_file(&config.output_file);
-
-    // create object for computing rewards (relative rarity) for a given address
-    let rewards = Reward::new();
 
     // track how many addresses have been found and information about them
     let mut found: u64 = 0;
@@ -275,50 +270,50 @@ pub fn gpu(config: Config) -> ocl::Result<()> {
                 .create2(&create2_salt, &config.init_code_hash);
             let address = deployer.create(create1_nonce.into());
 
-            // count total zero bytes
+            let matches_a_pattern =
+                config.patterns.is_empty() || config.patterns.iter().any(|p| p.matches(&address));
+
             let total = address.iter().filter(|&&b| b == 0).count();
+            let matches_total = config
+                .total_zeroes
+                .map_or(true, |minimum_total| total >= minimum_total as usize);
 
-            let key = total;
-            let reward = rewards.get(&key).unwrap_or("0");
-            let salt = hex::encode(create2_salt);
-            let contract_salt_nonce = create1_nonce - 1;
-            let output = format!(
-                "0x{} ({}) => {} => {}",
-                salt, contract_salt_nonce, address, reward
-            );
+            if matches_a_pattern && matches_total {
+                let salt = hex::encode(create2_salt);
+                let contract_salt_nonce = create1_nonce - 1;
+                let output = format!("0x{} ({}) => {}", salt, contract_salt_nonce, address);
 
-            let show = format!("{output} (total zeros: {total})");
-            found_list.push(show.to_string());
+                found_list.push(output.clone());
 
-            file.lock_exclusive().expect("Couldn't lock file.");
+                file.lock_exclusive().expect("Couldn't lock file.");
 
-            writeln!(&file, "{output}")
-                .unwrap_or_else(|_| panic!("Couldn't write to `{}` file.", config.output_file));
+                writeln!(&file, "{output}")
+                    .unwrap_or_else(|_| panic!("Couldn't write to `{}` file.", config.output_file));
 
-            #[allow(unstable_name_collisions)]
-            file.unlock().expect("Couldn't unlock file.");
+                #[allow(unstable_name_collisions)]
+                file.unlock().expect("Couldn't unlock file.");
 
-            // If the post_url is set, send a POST request to it in a separate thread
-            if let Some(url) = config.post_url.clone() {
-                let data = PostData {
-                    salt,
-                    nonce: contract_salt_nonce,
-                    total,
-                    address: address.to_string(),
-                    reward: reward.to_string(),
-                };
-                thread::spawn(move || {
-                    let client = Client::new();
-                    match client.post(url).json(&data).send() {
-                        Ok(response) => {
-                            println!("Successfully POSTed {}: {:?}", &data.address, response)
+                // If the post_url is set, send a POST request to it in a separate thread
+                if let Some(url) = config.post_url.clone() {
+                    let data = PostData {
+                        salt,
+                        nonce: contract_salt_nonce,
+                        total,
+                        address: address.to_string(),
+                    };
+                    thread::spawn(move || {
+                        let client = Client::new();
+                        match client.post(url).json(&data).send() {
+                            Ok(response) => {
+                                println!("Successfully POSTed {}: {:?}", &data.address, response)
+                            }
+                            Err(e) => eprintln!("Failed to POST result address. Error: {:?}", e),
                         }
-                        Err(e) => eprintln!("Failed to POST result address. Error: {:?}", e),
-                    }
-                });
-            }
+                    });
+                }
 
-            found += 1;
+                found += 1;
+            }
         }
     }
 }
@@ -329,7 +324,6 @@ struct PostData {
     nonce: u64,
     address: String,
     total: usize,
-    reward: String,
 }
 
 #[track_caller]
