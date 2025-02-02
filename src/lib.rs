@@ -17,7 +17,9 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use terminal_size::{terminal_size, Height};
 
+pub mod pattern;
 mod reward;
+pub use crate::pattern::Pattern;
 pub use reward::Reward;
 
 static KERNEL_SRC: &str = include_str!("./kernels/keccak256.cl");
@@ -29,15 +31,10 @@ pub struct Config {
     pub work_size: u32,
     pub gpu_device: u8,
     pub max_create3_nonce: u8,
-    pub total_zeroes_threshold: Option<u8>,
+    pub total_zeroes: Option<u8>,
     pub output_file: String,
     pub post_url: Option<String>,
     pub patterns: Vec<Pattern>,
-}
-
-pub struct Pattern {
-    pub pattern_bytes: [u8; 20],
-    pub mask_bytes: [u8; 20],
 }
 
 pub fn gpu(config: Config) -> ocl::Result<()> {
@@ -215,7 +212,7 @@ pub fn gpu(config: Config) -> ocl::Result<()> {
                      threshold: {:?} total zeroes",
                     hex::encode(salt),
                     BigEndian::read_u64(&view_buf),
-                    config.total_zeroes_threshold
+                    config.total_zeroes
                 ))?;
 
                 // display recently found solutions based on terminal height
@@ -298,6 +295,7 @@ pub fn gpu(config: Config) -> ocl::Result<()> {
             writeln!(&file, "{output}")
                 .unwrap_or_else(|_| panic!("Couldn't write to `{}` file.", config.output_file));
 
+            #[allow(unstable_name_collisions)]
             file.unlock().expect("Couldn't unlock file.");
 
             // If the post_url is set, send a POST request to it in a separate thread
@@ -355,21 +353,21 @@ fn mk_kernel_src(config: &Config) -> String {
         writeln!(src, "#define S_{} {}u", i + 1, x).unwrap();
     }
 
-    let tz = config.total_zeroes_threshold.unwrap_or(0);
+    let tz = config.total_zeroes.unwrap_or(0);
     writeln!(src, "#define TOTAL_ZEROES {tz}").unwrap();
 
     let mut conditions = vec![];
-    if config.total_zeroes_threshold.is_some() {
+    if config.total_zeroes.is_some() {
         conditions.push("hasTotal(digest)");
     }
 
     // Define pattern matching constants and function if patterns are provided
     if !config.patterns.is_empty() {
         for (i, pattern) in config.patterns.iter().enumerate() {
-            for (j, &byte) in pattern.pattern_bytes.iter().enumerate() {
+            for (j, &byte) in pattern.target.as_le_bytes().iter().enumerate() {
                 writeln!(src, "#define PATTERN_{}_{} {}u", i, j, byte).unwrap();
             }
-            for (j, &byte) in pattern.mask_bytes.iter().enumerate() {
+            for (j, &byte) in pattern.mask.as_le_bytes().iter().enumerate() {
                 writeln!(src, "#define MASK_{}_{} {}u", i, j, byte).unwrap();
             }
         }
