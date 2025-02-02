@@ -150,6 +150,10 @@ mod tests {
             self.0[i] = Some(b);
             self
         }
+
+        fn build(self) -> [Option<bool>; 40] {
+            self.0
+        }
     }
 
     #[test]
@@ -178,7 +182,7 @@ mod tests {
                     .set(37, false)
                     .set(38, false)
                     .set(39, true)
-                    .0
+                    .build()
             })
         )
     }
@@ -197,7 +201,7 @@ mod tests {
                     .set(37, false)
                     .set(38, false)
                     .set(39, true)
-                    .0
+                    .build()
             })
         )
     }
