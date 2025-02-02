@@ -74,7 +74,6 @@ struct Args {
     work_size: u32,
 
     #[arg(
-        short = 'p',
         long,
         default_value = "efficient_addresses.txt",
         help = "The file to output efficient addresses to"
@@ -106,7 +105,7 @@ impl TryInto<Config> for Args {
             .into_iter()
             .map(|pattern| {
                 let pattern_str = pattern.as_str();
-                let stripped = pattern_str.strip_prefix("!");
+                let stripped = pattern_str.strip_prefix("cap:");
                 let force_capitalize = stripped.is_some();
                 let pattern_str = stripped.unwrap_or(pattern_str);
                 let mut pattern = Pattern::from_str(pattern_str).map_err(|err| {

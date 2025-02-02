@@ -313,6 +313,14 @@ pub fn gpu(config: Config) -> ocl::Result<()> {
                 }
 
                 found += 1;
+            } else {
+                file.lock_exclusive().expect("Couldn't lock file.");
+
+                writeln!(&file, "miss: {}", address)
+                    .unwrap_or_else(|_| panic!("Couldn't write to `{}` file.", config.output_file));
+
+                #[allow(unstable_name_collisions)]
+                file.unlock().expect("Couldn't unlock file.");
             }
         }
     }
@@ -344,7 +352,7 @@ fn mk_kernel_src(config: &Config) -> String {
     let hash = config.init_code_hash.iter();
     let hash = hash.enumerate().map(|(i, x)| (i + 52, x));
     for (i, x) in factory.chain(owner).enumerate().chain(hash) {
-        writeln!(src, "#define S_{} {}u", i + 1, x).unwrap();
+        writeln!(src, "#define S_{} 0x{:x}u", i + 1, x).unwrap();
     }
 
     let tz = config.total_zeroes.unwrap_or(0);
@@ -358,11 +366,11 @@ fn mk_kernel_src(config: &Config) -> String {
     // Define pattern matching constants and function if patterns are provided
     if !config.patterns.is_empty() {
         for (i, pattern) in config.patterns.iter().enumerate() {
-            for (j, &byte) in pattern.target.as_le_bytes().iter().enumerate() {
-                writeln!(src, "#define PATTERN_{}_{} {}u", i, j, byte).unwrap();
+            for (j, &byte) in pattern.target.as_le_bytes().iter().rev().enumerate() {
+                writeln!(src, "#define PATTERN_{}_{} 0x{:x}u", i, j, byte).unwrap();
             }
-            for (j, &byte) in pattern.mask.as_le_bytes().iter().enumerate() {
-                writeln!(src, "#define MASK_{}_{} {}u", i, j, byte).unwrap();
+            for (j, &byte) in pattern.mask.as_le_bytes().iter().rev().enumerate() {
+                writeln!(src, "#define MASK_{}_{} 0x{:x}u", i, j, byte).unwrap();
             }
         }
 
