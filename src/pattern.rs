@@ -123,9 +123,6 @@ impl FromStr for Pattern {
             ));
         }
 
-        println!("target: {:b}", target);
-        println!("mask: {:b}", mask);
-
         Ok(Pattern {
             target,
             mask,

@@ -365,29 +365,38 @@ fn mk_kernel_src(config: &Config) -> String {
 
     // Define pattern matching constants and function if patterns are provided
     if !config.patterns.is_empty() {
-        for (i, pattern) in config.patterns.iter().enumerate() {
-            for (j, &byte) in pattern.target.as_le_bytes().iter().rev().enumerate() {
-                writeln!(src, "#define PATTERN_{}_{} 0x{:x}u", i, j, byte).unwrap();
-            }
-            for (j, &byte) in pattern.mask.as_le_bytes().iter().rev().enumerate() {
-                writeln!(src, "#define MASK_{}_{} 0x{:x}u", i, j, byte).unwrap();
-            }
-        }
-
         // Generate the pattern_match function
         writeln!(src, "bool pattern_match(const uchar *address) {{").unwrap();
         src.push_str("    return \n");
 
-        for (i, _pattern) in config.patterns.iter().enumerate() {
+        for (i, pattern) in config.patterns.iter().enumerate() {
             if i > 0 {
                 src.push_str("        ||\n");
             }
             src.push_str("        (");
-            for j in 0..20 {
+
+            for (j, (&target_byte, &mask_byte)) in pattern
+                .target
+                .as_le_bytes()
+                .iter()
+                .zip(pattern.mask.as_le_bytes().iter())
+                .rev()
+                .enumerate()
+            {
+                if mask_byte == 0 {
+                    continue;
+                }
+
                 if j > 0 {
                     src.push_str(" &&\n            ");
                 }
-                write!(src, "((address[{j}] & MASK_{i}_{j}) == PATTERN_{i}_{j})").unwrap();
+
+                write!(
+                    src,
+                    "((address[{}] & 0x{:x}u) == 0x{:x}u)",
+                    j, mask_byte, target_byte
+                )
+                .unwrap();
             }
             src.push_str(")");
         }
@@ -407,6 +416,8 @@ fn mk_kernel_src(config: &Config) -> String {
     writeln!(src, "#define MAX_NONCE {}u", config.max_create3_nonce).unwrap();
 
     src.push_str(KERNEL_SRC);
+
+    println!("{}", src);
 
     src
 }
