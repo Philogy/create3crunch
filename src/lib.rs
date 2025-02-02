@@ -1,6 +1,3 @@
-#![warn(unused_crate_dependencies, unreachable_pub)]
-#![deny(unused_must_use, rust_2018_idioms)]
-
 use clap as _;
 use clap_num as _;
 
@@ -20,8 +17,8 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use terminal_size::{terminal_size, Height};
 
-mod reward;
-pub use reward::Reward;
+pub mod pattern;
+pub use crate::pattern::Pattern;
 
 static KERNEL_SRC: &str = include_str!("./kernels/keccak256.cl");
 
@@ -32,33 +29,12 @@ pub struct Config {
     pub work_size: u32,
     pub gpu_device: u8,
     pub max_create3_nonce: u8,
-    pub leading_zeroes_threshold: Option<u8>,
-    pub total_zeroes_threshold: Option<u8>,
+    pub total_zeroes: Option<u8>,
     pub output_file: String,
     pub post_url: Option<String>,
+    pub patterns: Vec<Pattern>,
 }
 
-/// Given a Config object with a factory address, a caller address, a keccak-256
-/// hash of the contract initialization code, and a device ID, search for salts
-/// using OpenCL that will enable the factory contract to deploy a contract to a
-/// gas-efficient address via CREATE3. This method also takes threshold values
-/// for both leading zero bytes and total zero bytes - any address that does not
-/// meet or exceed the threshold will not be returned. Default threshold values
-/// are three leading zeroes or five total zeroes.
-///
-/// The 32-byte salt is constructed as follows:
-///   - the 20-byte calling address (to prevent frontrunning)
-///   - a random 4-byte segment (to prevent collisions with other runs)
-///   - a 4-byte segment unique to each work group running in parallel
-///   - a 4-byte nonce segment (incrementally stepped through during the run)
-///
-/// When a salt that will result in the creation of a gas-efficient contract
-/// address is found, it will be appended to `efficient_addresses.txt` along
-/// with the resultant address and the "value" (i.e. approximate rarity) of the
-/// resultant address.
-///
-/// This method is still highly experimental and could almost certainly use
-/// further optimization - contributions are more than welcome!
 pub fn gpu(config: Config) -> ocl::Result<()> {
     println!(
         "Setting up experimental OpenCL miner using device {}...",
@@ -67,9 +43,6 @@ pub fn gpu(config: Config) -> ocl::Result<()> {
 
     // (create if necessary) and open a file where found salts will be written
     let file = output_file(&config.output_file);
-
-    // create object for computing rewards (relative rarity) for a given address
-    let rewards = Reward::new();
 
     // track how many addresses have been found and information about them
     let mut found: u64 = 0;
@@ -231,11 +204,10 @@ pub fn gpu(config: Config) -> ocl::Result<()> {
                 // display information about the current search criteria
                 term.write_line(&format!(
                     "current search space: {}xxxxxxxx{:08x}\t\t\
-                     threshold: {:?} leading or {:?} total zeroes",
+                     threshold: {:?} total zeroes",
                     hex::encode(salt),
                     BigEndian::read_u64(&view_buf),
-                    config.leading_zeroes_threshold,
-                    config.total_zeroes_threshold
+                    config.total_zeroes
                 ))?;
 
                 // display recently found solutions based on terminal height
@@ -298,59 +270,58 @@ pub fn gpu(config: Config) -> ocl::Result<()> {
                 .create2(&create2_salt, &config.init_code_hash);
             let address = deployer.create(create1_nonce.into());
 
-            // count total and leading zero bytes
-            let mut total = 0;
-            let mut leading = 0;
-            for (i, &b) in address.iter().enumerate() {
-                if b == 0 {
-                    total += 1;
-                } else if leading == 0 {
-                    // set leading on finding non-zero byte
-                    leading = i;
-                }
-            }
+            let matches_a_pattern =
+                config.patterns.is_empty() || config.patterns.iter().any(|p| p.matches(&address));
 
-            let key = leading * 20 + total;
-            let reward = rewards.get(&key).unwrap_or("0");
-            let salt = hex::encode(create2_salt);
-            let contract_salt_nonce = create1_nonce - 1;
-            let output = format!(
-                "0x{} ({}) => {} => {}",
-                salt, contract_salt_nonce, address, reward
-            );
+            let total = address.iter().filter(|&&b| b == 0).count();
+            let matches_total = config
+                .total_zeroes
+                .map_or(true, |minimum_total| total >= minimum_total as usize);
 
-            let show = format!("{output} ({leading} / {total})");
-            found_list.push(show.to_string());
+            if matches_a_pattern && matches_total {
+                let salt = hex::encode(create2_salt);
+                let contract_salt_nonce = create1_nonce - 1;
+                let output = format!("0x{} ({}) => {}", salt, contract_salt_nonce, address);
 
-            file.lock_exclusive().expect("Couldn't lock file.");
+                found_list.push(output.clone());
 
-            writeln!(&file, "{output}")
-                .unwrap_or_else(|_| panic!("Couldn't write to `{}` file.", config.output_file));
+                file.lock_exclusive().expect("Couldn't lock file.");
 
-            file.unlock().expect("Couldn't unlock file.");
+                writeln!(&file, "{output}")
+                    .unwrap_or_else(|_| panic!("Couldn't write to `{}` file.", config.output_file));
 
-            // If the post_url is set, send a POST request to it in a seperate thread
-            if let Some(url) = config.post_url.clone() {
-                let data = PostData {
-                    salt,
-                    nonce: contract_salt_nonce,
-                    leading,
-                    total,
-                    address: address.to_string(),
-                    reward: reward.to_string(),
-                };
-                thread::spawn(move || {
-                    let client = Client::new();
-                    match client.post(url).json(&data).send() {
-                        Ok(response) => {
-                            println!("Successfully POSTed {}: {:?}", &data.address, response)
+                #[allow(unstable_name_collisions)]
+                file.unlock().expect("Couldn't unlock file.");
+
+                // If the post_url is set, send a POST request to it in a separate thread
+                if let Some(url) = config.post_url.clone() {
+                    let data = PostData {
+                        salt,
+                        nonce: contract_salt_nonce,
+                        total,
+                        address: address.to_string(),
+                    };
+                    thread::spawn(move || {
+                        let client = Client::new();
+                        match client.post(url).json(&data).send() {
+                            Ok(response) => {
+                                println!("Successfully POSTed {}: {:?}", &data.address, response)
+                            }
+                            Err(e) => eprintln!("Failed to POST result address. Error: {:?}", e),
                         }
-                        Err(e) => eprintln!("Failed to POST result address. Error: {:?}", e),
-                    }
-                });
-            }
+                    });
+                }
 
-            found += 1;
+                found += 1;
+            } else {
+                file.lock_exclusive().expect("Couldn't lock file.");
+
+                writeln!(&file, "miss: {}", address)
+                    .unwrap_or_else(|_| panic!("Couldn't write to `{}` file.", config.output_file));
+
+                #[allow(unstable_name_collisions)]
+                file.unlock().expect("Couldn't unlock file.");
+            }
         }
     }
 }
@@ -360,9 +331,7 @@ struct PostData {
     salt: String,
     nonce: u64,
     address: String,
-    leading: usize,
     total: usize,
-    reward: String,
 }
 
 #[track_caller]
@@ -375,8 +344,6 @@ fn output_file(path: &str) -> File {
         .unwrap_or_else(|_| panic!("Could not create or open `{}` file.", path))
 }
 
-/// Creates the OpenCL kernel source code by populating the template with the
-/// values from the Config object.
 fn mk_kernel_src(config: &Config) -> String {
     let mut src = String::with_capacity(2048 + KERNEL_SRC.len());
 
@@ -385,24 +352,57 @@ fn mk_kernel_src(config: &Config) -> String {
     let hash = config.init_code_hash.iter();
     let hash = hash.enumerate().map(|(i, x)| (i + 52, x));
     for (i, x) in factory.chain(owner).enumerate().chain(hash) {
-        writeln!(src, "#define S_{} {}u", i + 1, x).unwrap();
+        writeln!(src, "#define S_{} 0x{:x}u", i + 1, x).unwrap();
     }
 
-    let lz = config.leading_zeroes_threshold.unwrap_or(0);
-    writeln!(src, "#define LEADING_ZEROES {lz}").unwrap();
-    let tz = config.total_zeroes_threshold.unwrap_or(0);
+    let tz = config.total_zeroes.unwrap_or(0);
     writeln!(src, "#define TOTAL_ZEROES {tz}").unwrap();
 
-    let condition = match (
-        config.leading_zeroes_threshold,
-        config.total_zeroes_threshold,
-    ) {
-        (Some(_), Some(_)) => "hasLeading(digest) || hasTotal(digest)",
-        (Some(_), None) => "hasLeading(digest)",
-        (None, Some(_)) => "hasTotal(digest)",
-        (None, None) => unreachable!(),
+    let mut conditions = vec![];
+    if config.total_zeroes.is_some() {
+        conditions.push("hasTotal(digest)");
+    }
+
+    // Define pattern matching constants and function if patterns are provided
+    if !config.patterns.is_empty() {
+        for (i, pattern) in config.patterns.iter().enumerate() {
+            for (j, &byte) in pattern.target.as_le_bytes().iter().rev().enumerate() {
+                writeln!(src, "#define PATTERN_{}_{} 0x{:x}u", i, j, byte).unwrap();
+            }
+            for (j, &byte) in pattern.mask.as_le_bytes().iter().rev().enumerate() {
+                writeln!(src, "#define MASK_{}_{} 0x{:x}u", i, j, byte).unwrap();
+            }
+        }
+
+        // Generate the pattern_match function
+        writeln!(src, "bool pattern_match(const uchar *address) {{").unwrap();
+        src.push_str("    return \n");
+
+        for (i, _pattern) in config.patterns.iter().enumerate() {
+            if i > 0 {
+                src.push_str("        ||\n");
+            }
+            src.push_str("        (");
+            for j in 0..20 {
+                if j > 0 {
+                    src.push_str(" &&\n            ");
+                }
+                write!(src, "((address[{j}] & MASK_{i}_{j}) == PATTERN_{i}_{j})").unwrap();
+            }
+            src.push_str(")");
+        }
+        src.push_str(";\n}\n");
+
+        conditions.push("pattern_match(digest)");
+    }
+
+    let condition = if conditions.is_empty() {
+        "false".to_string()
+    } else {
+        conditions.join(" || ")
     };
-    writeln!(src, "#define SUCCESS_CONDITION() {}", condition).unwrap();
+
+    writeln!(src, "#define SUCCESS_CONDITION() ({})", condition).unwrap();
 
     writeln!(src, "#define MAX_NONCE {}u", config.max_create3_nonce).unwrap();
 
