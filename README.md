@@ -30,8 +30,8 @@ You can specify a `--post-url` argument. Results will be POSTed to this url.
 
 ### Custom addresses
 
-You can specify custom addresses. The miner will also accept capitalization and to a checksum ckeck. Use `x` for wildcards. You can also define bits by adding `[x01x]` into the pattern. This only works for full nibbles.
-Specify multiple pattern my adding multiple `--patern` argutmetns.
+You can specify custom addresses. The miner will also accept capitalization and do a checksum ckeck. Use `x` for wildcards. You can also define bits by adding `[x01x]` into the pattern. This only works for full nibbles.
+Specify multiple patterns my adding multiple `--patern` argumetns.
 
 Example command:
 
