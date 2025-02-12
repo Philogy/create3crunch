@@ -23,3 +23,25 @@ the initial fixed cost of computing the deploy proxy's address.
 ## Usage
 
 TODO, but in the meantime check the available options using `-h` or `--help`.
+
+## POST results
+
+You can specify a `--post-url` argument. Results will be POSTed to this url.
+
+### Custom addresses
+
+You can specify custom addresses. The miner will also accept capitalization and to a checksum ckeck. Use `x` for wildcards. You can also define bits by adding `[x01x]` into the pattern. This only works for full nibbles.
+Specify multiple pattern my adding multiple `--patern` argutmetns.
+
+Example command:
+
+```
+./target/release/create3crunch \
+    --factory 0x00000000000000000000000000000000d53c15aa \
+    --owner 0x2c8B14A270eb00000000000000000000aBF15BF8 \
+    --init-code-hash 0x1decbcf04b355d500000000000000000000000000000000cb9f7f8165e2095c3 \
+    --gpu-device 0 \
+    --pattern "0xaBxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+    --pattern "0xCexxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx[xx001010]" \
+    --output-file mined0.txt --case-sensitive
+```
