@@ -366,7 +366,7 @@ fn mk_kernel_src(config: &Config) -> String {
     // Define pattern matching constants and function if patterns are provided
     if !config.patterns.is_empty() {
         // Generate the pattern_match function
-        writeln!(src, "bool pattern_match(const uchar *address) {{").unwrap();
+        writeln!(src, "bool pattern_match(const uchar *vanity) {{").unwrap();
         src.push_str("    return \n");
 
         for (i, pattern) in config.patterns.iter().enumerate() {
@@ -393,7 +393,7 @@ fn mk_kernel_src(config: &Config) -> String {
 
                 write!(
                     src,
-                    "((address[{}] & 0x{:x}u) == 0x{:x}u)",
+                    "((vanity[{}] & 0x{:x}u) == 0x{:x}u)",
                     j, mask_byte, target_byte
                 )
                 .unwrap();
