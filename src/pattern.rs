@@ -28,6 +28,27 @@ impl Pattern {
     pub fn matches(&self, addr: &Address) -> bool {
         self.matches_bits(addr) && self.matches_capitalization(addr)
     }
+
+    pub fn to_cl_code(&self) -> String {
+        let byte_matches: Vec<_> = self
+            .target
+            .as_le_bytes()
+            .iter()
+            .copied()
+            .zip(self.mask.as_le_bytes().iter().copied())
+            .rev()
+            .enumerate()
+            .filter(|&(_, (_, mask_byte))| mask_byte != 0)
+            .map(|(i, (target_byte, mask_byte))| {
+                format!(
+                    "((vanity[{}] & 0x{:x}u) == 0x{:x}u)",
+                    i, mask_byte, target_byte
+                )
+            })
+            .collect();
+
+        byte_matches.join(" && \n")
+    }
 }
 
 impl FromStr for Pattern {

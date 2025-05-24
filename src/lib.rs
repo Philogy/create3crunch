@@ -375,29 +375,8 @@ fn mk_kernel_src(config: &Config) -> String {
             }
             src.push_str("        (");
 
-            for (j, (&target_byte, &mask_byte)) in pattern
-                .target
-                .as_le_bytes()
-                .iter()
-                .zip(pattern.mask.as_le_bytes().iter())
-                .rev()
-                .enumerate()
-            {
-                if mask_byte == 0 {
-                    continue;
-                }
+            src.push_str(&pattern.to_cl_code());
 
-                if j > 0 {
-                    src.push_str(" &&\n            ");
-                }
-
-                write!(
-                    src,
-                    "((vanity[{}] & 0x{:x}u) == 0x{:x}u)",
-                    j, mask_byte, target_byte
-                )
-                .unwrap();
-            }
             src.push_str(")");
         }
         src.push_str(";\n}\n");
